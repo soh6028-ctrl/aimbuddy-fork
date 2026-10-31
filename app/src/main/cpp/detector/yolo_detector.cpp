@@ -30,8 +30,11 @@ constexpr float kGpuMustBeFasterBy = 0.80f;
 /// emulator). It cannot beat the CPU path, and loading the network onto it takes about a minute.
 constexpr int kGpuTypeCpu = 3;
 
-/// CPU worker threads are capped so the game keeps most of the fast cores.
-constexpr int kMaxCpuThreads = 3;
+/// CPU worker threads are capped so the game keeps most of the fast cores. A small input leaves a
+/// core free anyway, so only a big one is held to the smaller cap.
+constexpr int kMaxCpuThreads = 4;
+constexpr int kMaxCpuThreadsBigInput = 3;
+constexpr int kBigInput = 320;
 
 /// How long idle OpenMP workers spin before sleeping. The library default (200 ms) would keep
 /// every worker busy between 30 to 60 Hz frames, wasting power and heat for no latency gain.
@@ -45,12 +48,12 @@ float elapsedMs(std::chrono::steady_clock::time_point since) {
 }
 
 /// Worker threads for CPU inference: the fast cores, but not all of them.
-int cpuThreadCount() {
+int cpuThreadCount(int cap) {
     const int big = ncnn::get_big_cpu_count();
     if (big > 0) {
-        return std::min(big, kMaxCpuThreads);
+        return std::min(big, cap);
     }
-    return std::max(1, std::min(ncnn::get_cpu_count() / 2, kMaxCpuThreads));
+    return std::max(1, std::min(ncnn::get_cpu_count() / 2, cap));
 }
 
 /// Options that suit both backends: low memory, half precision where the hardware allows it.
@@ -141,7 +144,7 @@ bool YoloDetector::load(const char* paramPath, const char* binPath, const ModelP
 
     applyCommonOptions(cpuNet_.opt);
     cpuNet_.opt.use_vulkan_compute = false;
-    cpuNet_.opt.num_threads = cpuThreadCount();
+    cpuNet_.opt.num_threads = cpuThreadCount(kMaxCpuThreads);
     if (!loadNet(cpuNet_, paramPath_.c_str(), binPath_.c_str()) || cpuNet_.input_indexes().empty() ||
         cpuNet_.output_indexes().empty()) {
         unload();
@@ -154,6 +157,9 @@ bool YoloDetector::load(const char* paramPath, const char* binPath, const ModelP
         unload();
         return false;
     }
+    // Now that the input size is known, the thread count is settled: a big input keeps a fast core for the game.
+    cpuNet_.opt.num_threads = cpuThreadCount(inputSize_ > kBigInput ? kMaxCpuThreadsBigInput : kMaxCpuThreads);
+
     if (profile_.declaredClassCount == 0) {
         // No description saved with the model: guess the roles from how many classes it has.
         const bool endToEnd = profile_.endToEndOutput;
