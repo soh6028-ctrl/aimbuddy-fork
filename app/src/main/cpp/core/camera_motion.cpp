@@ -8,11 +8,11 @@ namespace aimbuddy {
 namespace {
 
 /// Trust in the player's own figures before the camera has been measured, and when they were set by hand.
-constexpr float kPriorConfidence = 0.35f;
+constexpr float kPriorConfidence = 0.55f;
 constexpr float kManualConfidence = 0.9f;
 
 /// How often the estimate is looked at while measurements arrive.
-constexpr int64_t kEstimateEveryNs = 50'000'000;
+constexpr int64_t kEstimateEveryNs = 25'000'000;
 
 /// Measurements below this quality are replaced by what the response predicts.
 constexpr float kMinMeasurementQuality = 0.35f;
