@@ -25,6 +25,26 @@ constexpr float kFastestTimeConstantS = 0.025f;
 /// Finger speed limit at strength 0, as a fraction of the limit at strength 1.
 constexpr float kMinSpeedShare = 0.4f;
 
+/// A box this sure of itself is aimed at before the tracker has confirmed it, ranked this many pixels further
+/// away than it is so a confirmed target beside it still wins.
+constexpr float kSureEnoughToAim = 0.62f;
+constexpr float kTentativePenaltyPx = 70.0f;
+
+/// A rival this close to the crosshair is taken up the moment the locked target is lost, without waiting.
+constexpr float kTakeOverDistancePx = 120.0f;
+
+/// A target further than this many of its own heights from the crosshair is being acquired, not followed. The camera
+/// must be known at least this well for the burst, and the burst may keep this much travel on its way.
+constexpr float kAcquireErrorBoxes = 2.5f;
+constexpr float kAcquireMinConfidence = 0.45f;
+constexpr float kAcquireTravelPx = 130.0f;
+
+/// Dead zone for the head, as a fraction of the target's height (about a tenth of a head).
+constexpr float kHeadDeadzoneBoxFraction = 0.012f;
+
+/// A target moving at least this much is followed by carrying the anchor along instead of lifting the finger.
+constexpr float kRecentreWhileMovingShare = 0.25f;
+
 /// The speed estimate is only believed when it is this many times larger than its own uncertainty;
 /// the feed-forward fades in between the first and second value.
 constexpr float kFeedForwardMinSnr = 1.0f;
@@ -57,9 +77,9 @@ constexpr float kSwingWindowS = 0.7f;
 
 /// A swing takes the stability factor down by this share, to no less than the minimum; it comes
 /// back at this rate (per second) once the aim has been calm for a while.
-constexpr float kSwingStabilityKeep = 0.6f;
-constexpr float kMinStability = 0.2f;
-constexpr float kStabilityRecoveryPerS = 0.3f;
+constexpr float kSwingStabilityKeep = 0.8f;
+constexpr float kMinStability = 0.35f;
+constexpr float kStabilityRecoveryPerS = 0.9f;
 constexpr float kCalmBeforeRecoveryS = 0.5f;
 
 /// A target is judged to be stuck to the screen when, over a stretch of at least this many seconds and
@@ -333,8 +353,8 @@ AimOutput AimController::lift() {
         out.action = AimAction::kTouchUp;
         touching_ = false;
     }
-    fingerX_ = settings_.anchorX;
-    fingerY_ = settings_.anchorY;
+    fingerX_ = anchorNowX();
+    fingerY_ = anchorNowY();
     return out;
 }
 
@@ -344,7 +364,14 @@ void AimController::rankTargets(const TrackView* views, int count, const ModelPr
     for (int i = 0; i < count; ++i) {
         const TrackView& view = views[i];
         if (profile.roleOf(view.classId) != ClassRole::kBody || view.opacity < kMinTargetOpacity ||
-            view.phase == TrackPhase::kTentative || isGivenUp(view, lastStepNs_)) {
+            isGivenUp(view, lastStepNs_)) {
+            continue;
+        }
+        // A box the detector is very sure of is worth aiming at before the tracker has confirmed it. Waiting for
+        // confirmation costs two or three frames, and in a short match those are the frames that matter. Such a box
+        // is ranked a little further away than it is, so a target that is already confirmed beside it still wins.
+        const bool tentative = view.phase == TrackPhase::kTentative;
+        if (tentative && view.score < kSureEnoughToAim) {
             continue;
         }
         const AimPoint point = chooseAimPoint(view, nullptr, settings_.zone);
@@ -354,7 +381,8 @@ void AimController::rankTargets(const TrackView* views, int count, const ModelPr
         if (distance > reach) {
             continue;
         }
-        const float metric = priorityMetric(settings_.priority, view, distance);
+        const float metric =
+            priorityMetric(settings_.priority, view, distance) + (tentative ? kTentativePenaltyPx : 0.0f);
         if (best->index < 0 || metric < best->metric) {
             *best = {i, metric};
         }
@@ -403,6 +431,8 @@ void AimController::forgetScene() {
         givenUp_ = {};
     }
     forgetWatch();
+    anchorShiftX_ = 0.0f;
+    anchorShiftY_ = 0.0f;
     release();
 }
 
@@ -583,11 +613,16 @@ int AimController::selectTarget(int64_t nowNs, const TrackView* views, int count
         if (locked.index >= 0) {
             return keepOrSwitchLock(nowNs, views, best, locked);
         }
-        // The locked target is not visible right now: wait briefly in case it comes back.
-        if (waitingForLostTarget(nowNs)) {
+        // The locked target is not visible right now. A rival close to the crosshair is taken up at once — a match
+        // does not wait for one that has gone behind a wall. Only with nothing worth aiming at is the old target
+        // waited for, in case it steps back out.
+        if (best.index >= 0 && best.metric <= kTakeOverDistancePx) {
+            forgetTarget();
+        } else if (waitingForLostTarget(nowNs)) {
             return -1;
+        } else {
+            forgetTarget();
         }
-        forgetTarget();
     }
 
     if (best.index >= 0) {
@@ -628,8 +663,11 @@ bool AimController::beginPursuit(int64_t nowNs, const CameraResponse& response, 
     pursuit->movingShare = movingShareOf(*body);
 
     // The dead zone keeps the finger still when already on target. A moving target must be
-    // followed closely, so the dead zone shrinks as the target's speed becomes certain.
-    const float restingDeadzone = std::max(settings_.deadzoneMinPx, settings_.deadzoneBoxFraction * body->height);
+    // followed closely, so the dead zone shrinks as the target's speed becomes certain. The head is a
+    // small part of the body, so a dead zone measured in body heights is too coarse for it.
+    const float zoneFraction =
+        settings_.zone == AimZone::kHead ? kHeadDeadzoneBoxFraction : settings_.deadzoneBoxFraction;
+    const float restingDeadzone = std::max(settings_.deadzoneMinPx, zoneFraction * body->height);
     const float movingDeadzone = std::max(settings_.deadzoneMinPx, restingDeadzone * kMovingDeadzoneShare);
     pursuit->deadzone = lerp(restingDeadzone, movingDeadzone, pursuit->movingShare);
     return true;
@@ -649,8 +687,8 @@ AimOutput AimController::putFingerDown(int64_t nowNs, const Pursuit& pursuit) {
         runStartNs_ = nowNs;
     }
     touching_ = true;
-    fingerX_ = settings_.anchorX;
-    fingerY_ = settings_.anchorY;
+    fingerX_ = anchorNowX();
+    fingerY_ = anchorNowY();
     return {AimAction::kTouchDown, fingerX_, fingerY_};
 }
 
@@ -687,8 +725,16 @@ AimController::FingerStep AimController::planFingerStep(int64_t nowNs, const Cam
         step.y += pursuit.errorY * shrink / gainY * closing * yDirection;
     }
 
+    // Acquisition: an error many boxes wide is a target only just taken up, not one being followed. Where the
+    // camera is known well enough to be trusted, the finger then runs at full speed and the cap on travel still
+    // on its way is lifted, so the crosshair reaches a fresh target in a few steps instead of creeping up on it.
+    // A target that is already running is left out: there the lead is worth more than the speed.
+    const bool acquiring = pursuit.distance > kAcquireErrorBoxes * std::max(body.height, 1.0f) &&
+                           motion_->confidence() >= kAcquireMinConfidence && pursuit.movingShare < 0.5f;
+
     // A speed limit keeps a big error from becoming a sudden flick.
-    const float speedShare = lerp(kMinSpeedShare, 1.0f, std::clamp(settings_.strength, 0.0f, 1.0f));
+    const float speedShare =
+        acquiring ? 1.0f : lerp(kMinSpeedShare, 1.0f, std::clamp(settings_.strength, 0.0f, 1.0f));
     float allowed = settings_.maxFingerSpeedPxS * speedShare * dt;
 
     // While the camera's response is not known well, only a little finger travel may be on its
@@ -697,7 +743,10 @@ AimController::FingerStep AimController::planFingerStep(int64_t nowNs, const Cam
     float pendingX = 0.0f;
     float pendingY = 0.0f;
     motion_->unseenFinger(&pendingX, &pendingY);
-    const float room = std::max(0.0f, travelCapFor(motion_->confidence(), blindness) - std::hypot(pendingX, pendingY));
+    float room = std::max(0.0f, travelCapFor(motion_->confidence(), blindness) - std::hypot(pendingX, pendingY));
+    if (acquiring) {
+        room = std::max(room, kAcquireTravelPx);
+    }
     allowed = std::min(allowed, room);
 
     const float length = std::hypot(step.x, step.y);
@@ -710,21 +759,31 @@ AimController::FingerStep AimController::planFingerStep(int64_t nowNs, const Cam
 }
 
 AimOutput AimController::moveFinger(int64_t nowNs, float dt, const Pursuit& pursuit, FingerStep step) {
-    // Keep the finger inside its allowed circle. Hitting the edge (or drifting far out while the
-    // error is small) means the finger should be lifted and put back at the anchor.
+    // Keep the finger inside its allowed circle. Reaching the edge means the finger has to be back at the anchor:
+    // either it is lifted and put down there, or the anchor is carried along with it.
     float newX = fingerX_ + step.x;
     float newY = fingerY_ + step.y;
-    const float offsetX = newX - settings_.anchorX;
-    const float offsetY = newY - settings_.anchorY;
+    const float anchorX = anchorNowX();
+    const float anchorY = anchorNowY();
+    const float offsetX = newX - anchorX;
+    const float offsetY = newY - anchorY;
     const float offset = std::hypot(offsetX, offsetY);
     const float radius = std::max(settings_.anchorRadiusPx, 1.0f);
-    const bool hitEdge = offset > radius;
-    if (hitEdge) {
-        newX = settings_.anchorX + offsetX * radius / offset;
-        newY = settings_.anchorY + offsetY * radius / offset;
-    }
     const bool quiet = pursuit.distance < kQuietErrorBoxFraction * pursuit.body->height;
-    if (hitEdge || (offset > kRecentreShare * radius && quiet)) {
+
+    if (offset > radius) {
+        newX = anchorX + offsetX * radius / offset;
+        newY = anchorY + offsetY * radius / offset;
+        // A target that keeps moving walks the finger to the edge again and again. Lifting the finger for it costs a
+        // contact the game has to pick up afresh, so instead the circle is carried along: the anchor moves with the
+        // target and the finger keeps the travel it has left. A target standing still is not chased that way — the
+        // anchor would wander for nothing — so there the finger is lifted and put back.
+        if (pursuit.movingShare > kRecentreWhileMovingShare || quiet) {
+            recentreAnchor(newX, newY);
+        } else {
+            return lift();
+        }
+    } else if (offset > kRecentreShare * radius && quiet) {
         return lift();  // the next step puts the finger down at the anchor again
     }
 
@@ -739,6 +798,27 @@ AimOutput AimController::moveFinger(int64_t nowNs, float dt, const Pursuit& purs
     // Tell everyone who needs to know how the scene will slide because of this move.
     motion_->recordFinger(nowNs, static_cast<int64_t>(dt * 1e9f), movedX, movedY);
     return {AimAction::kTouchMove, fingerX_, fingerY_};
+}
+
+/// Carries the anchor, and with it the finger's circle, along to where the finger has got to, kept in the look area.
+/// The shift is held beside the setting, so a settings refresh does not undo it.
+void AimController::recentreAnchor(float fingerX, float fingerY) {
+    const float radius = std::max(settings_.anchorRadiusPx, 1.0f);
+    float shiftX = std::clamp(fingerX - settings_.anchorX, -radius, radius);
+    float shiftY = std::clamp(fingerY - settings_.anchorY, -radius, radius);
+    // The circle stays in the look half of the screen and off its edges; the crosshair is at the middle of it.
+    const float screenRight = crosshairX_ * 2.0f;
+    const float screenBottom = crosshairY_ * 2.0f;
+    const float minX = crosshairX_ + radius * 0.7f;
+    const float maxX = screenRight - radius * 0.3f;
+    const float minY = radius * 0.4f;
+    const float maxY = screenBottom - radius * 0.4f;
+    const float baseX = settings_.anchorX + shiftX;
+    const float baseY = settings_.anchorY + shiftY;
+    shiftX += std::clamp(baseX, minX, std::max(minX, maxX)) - baseX;
+    shiftY += std::clamp(baseY, minY, std::max(minY, maxY)) - baseY;
+    anchorShiftX_ = shiftX;
+    anchorShiftY_ = shiftY;
 }
 
 void AimController::forgetSwinging() {
