@@ -17,10 +17,11 @@ constexpr std::chrono::milliseconds kFrameWait{50};
 /// Weight of the newest sample in the smoothed statistics (about the last 20 samples).
 constexpr float kStatsSmoothing = 0.05f;
 
-/// The camera is looked at on a frame at least this long after the last one it was looked at on. That is 30 times a second:
-/// often enough that the newest reading is never more than a frame or two old when a box is drawn, and cheap enough
-/// not to take much from the game.
-constexpr int64_t kCameraLookIntervalNs = 30'000'000;
+/// The camera is looked at on a frame at least this long after the last one it was looked at on. That is 60 times a
+/// second: a box found in a frame is drawn well over a tenth of a second later, and every millisecond of camera
+/// movement in between is a millisecond the box would trail by. The gain and the delay are also learned twice as
+/// fast for it.
+constexpr int64_t kCameraLookIntervalNs = 16'000'000;
 
 /// How often debug builds print the statistics to the log.
 constexpr int64_t kStatsLogIntervalNs = 5'000'000'000;
@@ -149,7 +150,7 @@ void DetectionPipeline::applyConfidenceIfChanged(float& applied) {
 }
 
 /**
- * Measures how the picture slid since the last frame it was looked at on, 30 times a second at
+ * Measures how the picture slid since the last frame it was looked at on, 60 times a second at
  * most. This runs on the capture thread, for frames the detector never sees as well: a box found
  * in a frame is drawn well over a tenth of a second later, and the camera must be known up to
  * that moment, not only up to the picture the box was found in. The enemies being followed move
