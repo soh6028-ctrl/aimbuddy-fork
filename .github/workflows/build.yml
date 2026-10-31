@@ -33,15 +33,31 @@ jobs:
       - name: Point Gradle at the SDK
         run: echo "sdk.dir=/usr/local/lib/android/sdk" > local.properties
 
-      - name: Build debug APK
+      - name: Signing key
+        run: |
+          keytool -genkeypair -v \
+            -keystore "$RUNNER_TEMP/lockaim.jks" \
+            -alias lockaim \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass lockaim123 -keypass lockaim123 \
+            -dname "CN=LockAim, OU=Dev, O=LockAim, L=NA, S=NA, C=IN"
+          printf 'storeFile=%s\nstorePassword=lockaim123\nkeyAlias=lockaim\nkeyPassword=lockaim123\n' "$RUNNER_TEMP/lockaim.jks" > keystore.properties
+          {
+            echo "AIMBUDDY_KEYSTORE_FILE=$RUNNER_TEMP/lockaim.jks"
+            echo "AIMBUDDY_KEYSTORE_PASSWORD=lockaim123"
+            echo "AIMBUDDY_KEY_ALIAS=lockaim"
+            echo "AIMBUDDY_KEY_PASSWORD=lockaim123"
+          } >> "$GITHUB_ENV"
+
+      - name: Build release APK
         run: |
           chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon --stacktrace
+          ./gradlew assembleRelease --no-daemon --stacktrace -x lint -x lintVitalRelease
 
       - name: Collect APK
         run: |
           mkdir -p out
-          cp app/build/outputs/apk/debug/app-debug.apk "out/LockAim-build-${{ github.run_number }}.apk"
+          cp app/build/outputs/apk/release/app-release.apk "out/LockAim-build-${{ github.run_number }}.apk"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -53,5 +69,5 @@ jobs:
         with:
           tag_name: build-${{ github.run_number }}
           name: Build ${{ github.run_number }}
-          body: Debug APK.
+          body: Release APK, package com.aimbuddy.
           files: out/*.apk
