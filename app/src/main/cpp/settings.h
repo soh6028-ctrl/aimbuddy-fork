@@ -122,10 +122,12 @@ namespace Config {
     
     /// Default detection FOV radius for dynamic crop detection (in pixels)
     /// Larger = more area scanned, slower. Smaller = faster, less coverage.
-    constexpr float DEFAULT_DETECTION_FOV_RADIUS = 200.0f;
+    /// The region is clamped to 1.75 times the model input, so this is the widest a 256 px model can read.
+    constexpr float DEFAULT_DETECTION_FOV_RADIUS = 224.0f;
 
     /// Default aimbot target-selection FOV radius (in pixels)
-    constexpr float DEFAULT_AIM_FOV_RADIUS = 175.0f;
+    /// Kept equal to the detection zone: a target the detector can barely see at the edge is a poor thing to lock onto.
+    constexpr float DEFAULT_AIM_FOV_RADIUS = 224.0f;
 
     /// Legacy alias preserved for compatibility
     constexpr float DEFAULT_FOV_RADIUS = DEFAULT_DETECTION_FOV_RADIUS;
@@ -167,7 +169,8 @@ namespace Config {
     constexpr int64_t AIMBOT_COOLDOWN_MS = 8; // 120Hz = ~8ms
     
     /// Aimbot deadzone in pixels - don't aim if target within this distance from center
-    constexpr float AIMBOT_DEADZONE_PX = 5.0f;
+    /// A head at 1080p is 30 to 50 px tall, so 5 px was still a long way off it.
+    constexpr float AIMBOT_DEADZONE_PX = 1.5f;
     
     /// Minimum delta threshold - ignore movements smaller than this
     constexpr float AIMBOT_MIN_DELTA_PX = 1.0f;
