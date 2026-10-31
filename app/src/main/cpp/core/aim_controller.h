@@ -111,10 +111,18 @@ struct AimTelemetry {
  *     way at a time, so the first move is small and its effect teaches the real figure. If the
  *     aim swings anyway, a stability factor takes the strength down until it stops.
  *
+ * A target far from the crosshair is a target just taken up, not one being followed: there the
+ * finger is allowed to run and the cap on travel on its way is lifted, so the crosshair arrives in
+ * a few steps instead of creeping up on it.
+ *
  * A finger the game does not answer (the touch started while the screen was turning, or landed
  * where the game does not look around) would be moved for ever for nothing. When the finger has
  * been moved a good way and the scene has not slid with it, the finger is lifted and put down
  * again, waiting a little longer each time it happens again.
+ *
+ * A target that keeps drifting the same way walks the finger to the edge of its circle again and
+ * again. Rather than lifting the finger for it, the circle is carried along, so the contact is not
+ * given up in the middle of a track.
  *
  * A target that is not part of the scene would be chased for ever too: the player's own weapon
  * or character, which the detector sometimes takes for an enemy, stays where it is on the screen
@@ -136,7 +144,14 @@ public:
     AimController(const AimSettings& settings, CameraMotion* motion);
 
     /// Replaces the settings. Call from the same thread as step().
-    void setSettings(const AimSettings& settings) { settings_ = settings; }
+    void setSettings(const AimSettings& settings) {
+        if (settings.anchorX != settings_.anchorX || settings.anchorY != settings_.anchorY ||
+            settings.anchorRadiusPx != settings_.anchorRadiusPx) {
+            anchorShiftX_ = 0.0f;   // the player moved the circle: the shift from following is not wanted any more
+            anchorShiftY_ = 0.0f;
+        }
+        settings_ = settings;
+    }
     const AimSettings& settings() const { return settings_; }
 
     /// Where the in-game crosshair is, in display pixels.
@@ -214,6 +229,10 @@ private:
         int times = 0;
     };
 
+    // Where the circle really is: the setting, moved by however far following a target has carried it.
+    float anchorNowX() const { return settings_.anchorX + anchorShiftX_; }
+    float anchorNowY() const { return settings_.anchorY + anchorShiftY_; }
+
     // Target choice.
     int selectTarget(int64_t nowNs, const TrackView* views, int count, const ModelProfile& profile);
     bool isGivenUp(const TrackView& view, int64_t nowNs) const;
@@ -239,6 +258,7 @@ private:
     FingerStep planFingerStep(int64_t nowNs, const CameraResponse& response, const Pursuit& pursuit,
                               const PlayerInput& player, float dt) const;
     AimOutput moveFinger(int64_t nowNs, float dt, const Pursuit& pursuit, FingerStep step);
+    void recentreAnchor(float fingerX, float fingerY);
     AimOutput lift();
     void noteFinger();
 
@@ -250,6 +270,10 @@ private:
     CameraMotion* motion_;
     float crosshairX_ = 0.0f;
     float crosshairY_ = 0.0f;
+
+    // How far following a target has carried the circle away from its setting.
+    float anchorShiftX_ = 0.0f;
+    float anchorShiftY_ = 0.0f;
 
     // Snapshots of the tracker, kept as members so a step allocates nothing. Pursuit::body points into them.
     std::array<TrackView, kMaxTracks> nowViews_{};
